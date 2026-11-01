@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e9eaec">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Line by Line Reader</title>
+<style>
+:root{--bg:#e9eaec;--fg:#1f2328;--mut:#5d646c;--acc:#3c6e71;--line:#cfd2d6;--card:#f6f7f8}
+@media (prefers-color-scheme:dark){:root{--bg:#17181a;--fg:#e6e8ea;--mut:#9aa1a9;--acc:#7fb3b5;--line:#33363a;--card:#222427}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);overscroll-behavior:none;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+#stage{position:fixed;inset:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+#content{position:absolute;inset:env(safe-area-inset-top) 0 env(safe-area-inset-bottom) 0;display:flex;align-items:center;
+  justify-content:center;padding:52px 18px 40px;overflow:hidden}
+#inner{width:100%;max-width:46em;text-align:center;font-size:22px}
+#src{font-family:Charter,"Iowan Old Style",Georgia,serif;font-size:1.3em;line-height:1.35;font-weight:500}
+#tgt{margin-top:.7em;font-size:.95em;line-height:1.35;color:var(--acc)}
+#gloss{margin-top:1em;padding-top:.8em;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;justify-content:center;gap:.35em .2em}
+.p{display:inline-flex;flex-direction:column;align-items:center;padding:0 .4em;font-size:.62em;line-height:1.25}
+.p b{font-weight:600}
+.p i{font-style:normal;color:var(--mut)}
+#prog{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 10px);text-align:center;font-size:12px;color:var(--mut);pointer-events:none}
+#mbtn{position:absolute;top:calc(env(safe-area-inset-top) + 6px);right:8px;width:44px;height:44px;border:0;background:none;color:var(--mut);font-size:24px;cursor:pointer}
+#menu{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:5}
+#menu[hidden]{display:none}
+.card{width:min(92vw,380px);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:14px;font-size:16px}
+.card label{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.card select,.card input[type=number]{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;max-width:60%}
+.btn{padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;text-align:center;cursor:pointer}
+.btn:focus-visible,#mbtn:focus-visible{outline:2px solid var(--acc)}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="content"><div id="inner"><div id="src"></div><div id="tgt"></div><div id="gloss"></div></div></div>
+  <button id="mbtn" aria-label="Menu">☰</button>
+  <div id="prog"></div>
+</div>
+<div id="menu" hidden>
+  <div class="card">
+    <label>Chapter <select id="chsel"></select></label>
+    <label>Sentence <input id="jump" type="number" min="1"></label>
+    <label>Show word gloss <input id="gl" type="checkbox" checked></label>
+    <label class="btn">Import book.json<input id="file" type="file" accept=".json,application/json" hidden></label>
+    <button class="btn" id="close">Close</button>
+  </div>
+</div>
+<script>
+// Which side of the screen moves forward (tap on that side, arrow key on that side). Swipe left is always forward.
+const NEXT_SIDE = 'right';
+const RTL = ['ar', 'he', 'fa', 'ur'];
+const $ = s => document.querySelector(s);
+let book = null, flat = [], idx = 0, showGloss = true;
+
+const ls = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+};
+function db() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('reader', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function kv(op, key, val) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const st = d.transaction('kv', op === 'get' ? 'readonly' : 'readwrite').objectStore('kv');
+    const rq = op === 'get' ? st.get(key) : st.put(val, key);
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  });
+}
+
+function setBook(b) {
+  book = b; flat = [];
+  b.chapters.forEach((ch, c) => ch.sentences.forEach((s, i) => flat.push({ c, i, s })));
+  const p = ls.get('pos');
+  idx = Math.max(0, flat.findIndex(f => p && f.c === p.c && f.i === p.i));
+  render();
+}
+
+function fit() {
+  const content = $('#content'), inner = $('#inner'), cs = getComputedStyle(content);
+  const avail = content.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  let lo = 11, hi = 44;
+  for (let k = 0; k < 8; k++) {
+    const mid = (lo + hi) / 2;
+    inner.style.fontSize = mid + 'px';
+    if (inner.offsetHeight <= avail) lo = mid; else hi = mid;
+  }
+  inner.style.fontSize = lo + 'px';
+  // Fallback for extremely long sentences: allow scrolling instead of clipping.
+  const tooTall = inner.offsetHeight > avail;
+  content.style.overflowY = tooTall ? 'auto' : 'hidden';
+  content.style.alignItems = tooTall ? 'flex-start' : 'center';
+  content.scrollTop = 0;
+}
+
+function render() {
+  if (!flat.length) {
+    $('#src').textContent = 'Open the menu and import a book.json file.';
+    $('#tgt').textContent = ''; $('#gloss').innerHTML = ''; $('#prog').textContent = '';
+    fit(); return;
+  }
+  const { c, i, s } = flat[idx], rtl = RTL.includes(book.source_code);
+  $('#src').textContent = s.s; $('#src').dir = rtl ? 'rtl' : 'ltr';
+  $('#tgt').textContent = s.t;
+  const g = $('#gloss'); g.innerHTML = ''; g.dir = rtl ? 'rtl' : 'ltr';
+  g.style.display = showGloss && s.g && s.g.length ? 'flex' : 'none';
+  if (showGloss) (s.g || []).forEach(([a, b]) => {
+    const p = document.createElement('span'), x = document.createElement('b'), y = document.createElement('i');
+    p.className = 'p'; x.textContent = a; y.textContent = b || '\u00a0'; p.append(x, y); g.append(p);
+  });
+  $('#prog').textContent = `${book.chapters[c].title}  ${i + 1} / ${book.chapters[c].sentences.length}`;
+  ls.set('pos', { c, i });
+  fit();
+}
+
+function go(d) {
+  if (!flat.length) return;
+  idx = Math.min(flat.length - 1, Math.max(0, idx + d));
+  render();
+}
+
+// Navigation: swipe, tap, keyboard
+const stage = $('#stage'), menu = $('#menu');
+let x0 = 0, y0 = 0;
+const tapDir = x => { const f = x / innerWidth; return NEXT_SIDE === 'right' ? (f < 0.6 ? 1 : -1) : (f > 0.4 ? 1 : -1); };
+stage.addEventListener('touchstart', e => { x0 = e.changedTouches[0].clientX; y0 = e.changedTouches[0].clientY; }, { passive: true });
+stage.addEventListener('touchend', e => {
+  if (e.target.closest('button')) return;
+  const t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) go(dx < 0 ? 1 : -1);
+  else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) go(tapDir(t.clientX));
+  e.preventDefault(); // suppress the synthetic click
+}, { passive: false });
+stage.addEventListener('click', e => { if (!e.target.closest('button')) go(tapDir(e.clientX)); });
+document.addEventListener('keydown', e => {
+  if (!menu.hidden) return;
+  const fwd = NEXT_SIDE === 'right' ? 'ArrowLeft' : 'ArrowRight', back = NEXT_SIDE === 'right' ? 'ArrowRight' : 'ArrowLeft';
+  if (e.key === fwd || e.key === ' ') go(1); else if (e.key === back) go(-1);
+});
+
+// Menu
+function openMenu() {
+  const sel = $('#chsel'); sel.innerHTML = '';
+  (book ? book.chapters : []).forEach((ch, c) => sel.add(new Option(ch.title, c)));
+  if (flat.length) { sel.value = flat[idx].c; $('#jump').value = flat[idx].i + 1; }
+  $('#gl').checked = showGloss;
+  menu.hidden = false;
+}
+$('#mbtn').onclick = openMenu;
+$('#close').onclick = () => { menu.hidden = true; };
+menu.addEventListener('click', e => { if (e.target === menu) menu.hidden = true; });
+$('#chsel').onchange = e => { idx = Math.max(0, flat.findIndex(f => f.c === +e.target.value)); $('#jump').value = 1; render(); };
+$('#jump').onchange = e => {
+  const c = +$('#chsel').value, n = Math.max(1, +e.target.value || 1);
+  const inCh = flat.filter(f => f.c === c); if (!inCh.length) return;
+  idx = flat.indexOf(inCh[Math.min(n, inCh.length) - 1]); render(); menu.hidden = true;
+};
+$('#gl').onchange = e => { showGloss = e.target.checked; ls.set('gloss', showGloss); render(); };
+$('#file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const b = JSON.parse(await f.text());
+    if (!Array.isArray(b.chapters)) throw new Error('missing chapters');
+    await kv('put', 'book', b);
+    ls.set('pos', null); setBook(b); menu.hidden = true;
+  } catch (err) { alert('Could not import this file: ' + err.message); }
+};
+
+addEventListener('resize', fit);
+addEventListener('orientationchange', fit);
+
+(async function init() {
+  const g = ls.get('gloss'); if (g !== null) showGloss = g;
+  try { const b = await kv('get', 'book'); if (b) { setBook(b); return; } } catch (e) {}
+  try { // optional: a book.json placed next to index.html (local testing only)
+    const r = await fetch('book.json'); if (r.ok) { const b = await r.json(); await kv('put', 'book', b); setBook(b); return; }
+  } catch (e) {}
+  render(); openMenu();
+})();
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>

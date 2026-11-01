@@ -1,0 +1,7 @@
+source/
+data/
+.venv/
+__pycache__/
+book.json
+*.jsonl
+prompt_plan.txt

@@ -1,0 +1,13 @@
+{
+  "title": "My Book",
+  "source_lang": "Romanian",
+  "source_code": "ro",
+  "target_lang": "English",
+  "model": "gpt-oss:20b",
+  "ollama_url": "http://localhost:11434",
+  "num_ctx": 8192,
+  "think": "low",
+  "input_dir": "source",
+  "output_dir": "data",
+  "char_map": { "ş": "ș", "Ş": "Ș", "ţ": "ț", "Ţ": "Ț" }
+}
